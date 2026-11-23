@@ -288,7 +288,7 @@ if(USE_AX_SDK)
             include(FetchContent)
             FetchContent_Declare(
                 ax_sdk
-                GIT_REPOSITORY https://github.com
+                GIT_REPOSITORY https://github.com/galaxywarriordad/ax-sdk.git
                 GIT_TAG        v1_36_2
                 GIT_SHALLOW    FALSE
             )
