@@ -32,7 +32,7 @@ project(amiberry
     VERSION 8.6.0
     LANGUAGES C CXX
     DESCRIPTION "Amiberry [AX] — Deterministic Commodore Amiga 500 / 1200 / CD32 engine"
-    HOMEPAGE_URL "https://github.com"
+    HOMEPAGE_URL "https://github.com/BlitterStudio/amiberry.git"
 )
 
 include(cmake/HostArchitecture.cmake)
