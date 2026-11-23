@@ -1,0 +1,60 @@
+name: Build Release Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "CMake build configuration"
+        type: choice
+        options:
+          - Release
+          - RelWithDebInfo
+        default: Release
+      skylake_arch:
+        description: "Enable Skylake microarchitecture tuning (-march=skylake)"
+        type: boolean
+        default: true
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout Amiberry-AX
+        uses: actions/checkout@v5
+        with:
+          submodules: "recursive"
+
+      - name: Install System Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config git \
+            libsdl3-dev libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev \
+            libflac-dev libmpg123-dev libmpeg2-4-dev libportmidi-dev \
+            libzstd-dev libpng-dev zlib1g-dev libasound2-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libxml2-dev libfreetype-dev
+
+      - name: Configure, Build & Stage Amiberry [AX] (Linux)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} \
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/dist/amiberry-ax-linux-x86_64" \
+            -DUSE_AX_SDK=ON \
+            -DAX_SKYLAKE_ARCH=${{ inputs.skylake_arch }} \
+            -DWITH_LTO=ON \
+            -DWITH_STRIP=ON \
+            -DUSE_PORTMIDI=ON \
+            -DUSE_LIBMPEG2=ON \
+            -DUSE_MPG123=ON \
+            -DUSE_ZSTD=ON \
+            -DUSE_OPENGL=ON
+          cmake --build build --parallel
+          cmake --install build
+
+      - name: Upload Linux Release Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: amiberry-ax-linux-x86_64
+          path: dist/amiberry-ax-linux-x86_64
+          retention-days: 14
