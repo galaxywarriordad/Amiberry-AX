@@ -32,7 +32,7 @@ project(amiberry
     VERSION 8.6.0
     LANGUAGES C CXX
     DESCRIPTION "Amiberry [AX] — Deterministic Commodore Amiga 500 / 1200 / CD32 engine"
-    HOMEPAGE_URL "https://github.com/BlitterStudio/amiberry.git"
+    HOMEPAGE_URL "https://github.com/galaxywarriordad/Amiberry-AX"
 )
 
 include(cmake/HostArchitecture.cmake)
@@ -50,7 +50,7 @@ if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_CURRENT_BINARY_DIR)
     message(FATAL_ERROR "In-tree builds are not supported. Use a separate build directory.")
 endif()
 
-set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake ${CMAKE_MODULE_PATH})
+set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake${CMAKE_MODULE_PATH})
 include(CMakeDependentOption)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
@@ -84,9 +84,22 @@ option(USE_IPC_SOCKET    "Use a local socket for IPC control (Unix socket; named
 option(WITH_LTO          "Enable Link Time Optimization (ThinLTO / IPO)" ON)
 option(WITH_PGO_GENERATE "Generate profile data for Profile-Guided Optimization" OFF)
 option(WITH_PGO_USE      "Use profile data for Profile-Guided Optimization" OFF)
-option(WITH_OPTIMIZE     "Enable native CPU optimizations" OFF)
+option(WITH_OPTIMIZE     "Enable native CPU optimizations" ON)
 option(WITH_STRIP        "Strip symbols from the Release binary" ON)
 option(BUNDLE_SDL        "Bundle SDL3 shared libraries into the package" OFF)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND (MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC"))
+    add_compile_definitions(
+        _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH=1
+        _DISABLE_VECTOR_ANNOTATION
+    )
+    add_compile_options(/bigobj)
+endif()
+
+if(WITH_LTO)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+endif()
 
 if(NOT AMIBERRY_IMGUI AND USE_VULKAN)
     message(FATAL_ERROR "This build has no ImGui, which the Vulkan renderer's overlay needs: build it with USE_VULKAN=OFF")
@@ -326,4 +339,3 @@ elseif (CMAKE_SYSTEM_NAME STREQUAL "Windows")
 endif ()
 
 include(packaging/CMakeLists.txt)
-
