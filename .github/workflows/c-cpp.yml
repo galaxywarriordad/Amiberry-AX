@@ -19,13 +19,10 @@ on:
       - '**.md'
       - 'wiki/**'
 
-# Cancel older in-progress runs for the same branch/PR ref.
-# This reduces wasted CI minutes when multiple pushes happen quickly.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-# Set least-privilege defaults for all jobs
 permissions:
   contents: read
 
@@ -70,9 +67,6 @@ jobs:
       - name: Ensure GLib is available for QEMU-UAE plugin bundling
         if: matrix.arch == 'intel'
         run: |
-          # Intel runners normally include GLib already. Avoid upgrading it via
-          # the old gobject-introspection workaround, since Homebrew postinstall
-          # failures there can fail CI even when the libraries are usable.
           if ! brew --prefix glib >/dev/null 2>&1; then
             brew install glib || true
           fi
@@ -82,14 +76,7 @@ jobs:
 
       - name: Install dependencies (Homebrew)
         run: |
-          # `brew bundle` installs formulae concurrently, so sdl3 (which depends on
-          # cmake) races the cmake entry for the cmake lock and intermittently fails
-          # ("a `brew install --formula sdl3` process has already locked .../cmake").
-          # Install the shared build dependency first, then retry the bundle once to
-          # ride out any remaining transient lock contention.
           if [ "${{ matrix.arch }}" = "intel" ]; then
-            # Homebrew no longer builds new Intel bottles. Keep the runner's
-            # installed formulae and show source-build output in the job log.
             export HOMEBREW_NO_AUTO_UPDATE=1
             if ! brew list --formula cmake >/dev/null 2>&1; then
               brew install cmake
@@ -108,10 +95,6 @@ jobs:
         run: |
           cmake -B build -DQEMU_UAE_PLUGIN="$QEMU_UAE_PLUGIN" && cmake --build build -j$(sysctl -n hw.ncpu)
 
-      # GPL/LGPL compliance: record which Homebrew libraries this leg's build
-      # actually bundled, at the exact keg versions. The merge job turns the
-      # per-arch scans into the third-party source archive attached to the
-      # release. Tag builds only; PR/branch builds are untouched.
       - name: Scan bundled third-party libraries (release tags)
         if: github.ref_type == 'tag'
         run: |
@@ -152,9 +135,6 @@ jobs:
       contents: read
       actions: write
     env:
-      # Pull requests from forks get no repository secrets, so signing and
-      # notarization run only where the Apple credentials are available. The
-      # bundle and dependency checks above run for every pull request.
       SIGN_MACOS: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - name: Check out repository code
@@ -179,7 +159,6 @@ jobs:
 
       - name: Create Universal binary with lipo
         run: |
-          # macOS ships bash 3.2 (GPLv2); install bash 5 for associative arrays
           if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
             brew install bash
             exec "$(brew --prefix)/bin/bash" --noprofile --norc -euo pipefail "$0" "$@"
@@ -187,24 +166,19 @@ jobs:
           set -euo pipefail
 
           mkdir -p universal-app/Amiberry.app
-
-          # Start with the arm64 app as the base (preserves bundle structure)
           cp -R arm64-app/Amiberry.app/ universal-app/Amiberry.app/
 
-          # Merge the main executable
           lipo -create \
             x86_64-app/Amiberry.app/Contents/MacOS/Amiberry \
             arm64-app/Amiberry.app/Contents/MacOS/Amiberry \
             -output universal-app/Amiberry.app/Contents/MacOS/Amiberry
           chmod +x universal-app/Amiberry.app/Contents/MacOS/Amiberry
 
-          # Helper: merge a single binary with lipo, skipping if already universal
           merge_binary() {
             local x86_file="$1" arm_file="$2" output="$3"
             if [ ! -f "$x86_file" ] || [ ! -f "$arm_file" ]; then
               return
             fi
-            # If a file is already universal (e.g. capsimage builds fat), just copy it
             local x86_archs arm_archs
             x86_archs=$(lipo -info "$x86_file" 2>/dev/null | sed 's/.*: //')
             arm_archs=$(lipo -info "$arm_file" 2>/dev/null | sed 's/.*: //')
@@ -219,14 +193,6 @@ jobs:
             fi
           }
 
-          # Helper: extract library stem from a versioned dylib filename
-          # For libs with -N in the name (e.g. libglib-2.0), strip only the last version component
-          #   libglib-2.0.0.dylib      → libglib-2.0
-          #   libgobject-2.0.0.dylib   → libgobject-2.0
-          # For all other libs, strip the entire trailing version
-          #   libavif.16.4.0.dylib     → libavif
-          #   libSDL3.0.6.0.dylib      → libSDL3
-          #   libpng16.16.dylib        → libpng16
           lib_stem() {
             local name="${1%.dylib}"
             if [[ "$name" =~ -[0-9] ]] && [[ "$name" =~ \.[0-9]+([.][0-9]+)*$ ]]; then
@@ -240,7 +206,6 @@ jobs:
           ARM_FW="arm64-app/Amiberry.app/Contents/Frameworks"
           UNI_FW="universal-app/Amiberry.app/Contents/Frameworks"
 
-          # Build stem → filename maps for both architectures
           declare -A x86_stems arm_stems
           if [ -d "$X86_FW" ]; then
             for f in "$X86_FW"/*.dylib; do
@@ -259,7 +224,6 @@ jobs:
             done
           fi
 
-          # Parity check: warn about mismatches between architectures
           echo "=== Checking dylib parity between x86_64 and arm64 builds ==="
           had_mismatch=0
           for stem in "${!arm_stems[@]}"; do
@@ -283,10 +247,8 @@ jobs:
             echo "  All dylibs match between architectures"
           fi
 
-          # Merge Frameworks dylibs using stem-aware matching
           echo "=== Merging Frameworks dylibs ==="
           declare -A merged_stems
-          # Collect all unique stems from both architectures
           all_stems=()
           for stem in "${!arm_stems[@]}"; do all_stems+=("$stem"); done
           for stem in "${!x86_stems[@]}"; do
@@ -304,11 +266,9 @@ jobs:
 
             if [ -n "$x86_name" ] && [ -n "$arm_name" ]; then
               if [ "$x86_name" = "$arm_name" ]; then
-                # Same filename — standard merge
                 echo "  Merging: $arm_name"
                 merge_binary "$X86_FW/$x86_name" "$ARM_FW/$arm_name" "$UNI_FW/$arm_name"
               else
-                # Version mismatch — merge by stem, provide both names
                 echo "  Merging with version mismatch: x86_64=$x86_name + arm64=$arm_name"
                 merge_binary "$X86_FW/$x86_name" "$ARM_FW/$arm_name" "$UNI_FW/$arm_name"
                 ln -sf "$arm_name" "$UNI_FW/$x86_name"
@@ -322,7 +282,6 @@ jobs:
             fi
           done
 
-          # Merge all dylibs in plugins (arm64 base + any x86-only plugins)
           UNI_PLUGINS="universal-app/Amiberry.app/Contents/Resources/plugins"
           X86_PLUGINS="x86_64-app/Amiberry.app/Contents/Resources/plugins"
           ARM_PLUGINS="arm64-app/Amiberry.app/Contents/Resources/plugins"
@@ -352,17 +311,14 @@ jobs:
           fi
           lipo "$QEMU_PLUGIN" -verify_arch x86_64 arm64
 
-          # Verify the main binary is universal
           echo "=== Universal binary info ==="
           lipo -info universal-app/Amiberry.app/Contents/MacOS/Amiberry
           file universal-app/Amiberry.app/Contents/MacOS/Amiberry
 
-          # Verify all Frameworks dylibs are universal
           echo "=== Verifying Frameworks dylibs ==="
           non_universal=0
           for dylib in "$UNI_FW"/*.dylib; do
             [ -f "$dylib" ] || continue
-            # Skip symlinks — they point to an already-checked universal dylib
             [ -L "$dylib" ] && continue
             archs=$(lipo -info "$dylib" 2>/dev/null | sed 's/.*: //')
             name=$(basename "$dylib")
@@ -419,8 +375,6 @@ jobs:
             done
           }
 
-          # Bundled dylibs and plugins carry no LC_RPATH of their own; every
-          # @rpath/ reference resolves through the executable's runpath.
           for arch in x86_64 arm64; do
             if ! otool -arch "$arch" -l "$MAIN_BIN" | grep -A2 LC_RPATH |
                 grep -qF '@executable_path/../Frameworks/'; then
@@ -447,7 +401,7 @@ jobs:
           APPLE_DEVID_CERT_P12_PASSWORD: ${{ secrets.APPLE_DEVID_CERT_P12_PASSWORD }}
           APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
         run: |
-          set +x  # Mask output for security
+          set +x
           CERTIFICATE_PATH=$RUNNER_TEMP/apple_devid_cert.p12
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
           echo -n "$APPLE_DEVID_CERT_BASE64" | base64 --decode -o $CERTIFICATE_PATH
@@ -498,8 +452,6 @@ jobs:
         run: |
           set -uo pipefail
           ZIP="Amiberry-${{ github.sha }}-macOS-universal.zip"
-          # Stream notarytool output to both the log and a file, without
-          # letting `set -e` kill the script before we can echo the rejection.
           xcrun notarytool submit "$ZIP" --wait \
             --apple-id "midwan@gmail.com" \
             --password ${{ secrets.APPLE_NOTARY_APP_PASSWORD }} \
@@ -522,9 +474,6 @@ jobs:
       - name: Staple the notary receipt to the application bundle
         if: env.SIGN_MACOS == 'true'
         run: |
-          # Right after notarization is accepted, fetching the ticket from
-          # Apple's CloudKit service can fail ("The network connection was
-          # lost", error 68) until it has propagated: retry with a pause.
           for attempt in 1 2 3 4 5 6; do
             if xcrun stapler staple universal-app/Amiberry.app; then
               break
@@ -541,8 +490,6 @@ jobs:
       - name: Create DMG package
         run: |
           set -euo pipefail
-
-          # Read version from CMakeLists.txt (BSD-compatible, no grep -P)
           VERSION=$(sed -n 's/.*VERSION \([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' CMakeLists.txt | head -1)
           PRE_RELEASE=$(sed -n 's/.*VERSION_PRE_RELEASE "\([0-9]*\)".*/\1/p' CMakeLists.txt | head -1)
           if [ -n "$PRE_RELEASE" ]; then
@@ -552,20 +499,15 @@ jobs:
           fi
           DMG_NAME="Amiberry-${DMG_VERSION}-macOS-universal"
 
-          # Create a staging directory for DMG contents
           STAGING="dmg-staging"
           rm -rf "$STAGING"
           mkdir -p "$STAGING"
           cp -R universal-app/Amiberry.app "$STAGING/"
           ln -s /Applications "$STAGING/Applications"
 
-          # Copy background image
           mkdir -p "$STAGING/.background"
           cp packaging/dmg/AppDMGBackground.tiff "$STAGING/.background/background.tiff"
 
-          # Create a writable DMG, apply Finder layout/background, then compress.
-          # A runner's disk image services can briefly refuse a new image with
-          # "Resource busy", so retry the create with backoff.
           RW_DMG="${DMG_NAME}-rw.dmg"
           for attempt in 1 2 3 4 5; do
             if hdiutil create -volname "Amiberry" \
@@ -582,10 +524,6 @@ jobs:
           done
 
           DEVICE=""
-
-          # Spotlight/QuickLook or diskimages-helper can still hold the
-          # freshly-scripted volume open ("Resource busy", hdiutil exit 16),
-          # so retry with backoff and force-detach only as a last resort.
           detach_dmg() {
             local dev="$1" i
             for i in 1 2 3 4 5; do
@@ -628,9 +566,6 @@ jobs:
           path: Amiberry-*.dmg
           retention-days: 7
 
-      # GPL/LGPL compliance: build the third-party source archive for this
-      # release from the per-arch scans of the two build legs, and offer it
-      # next to the DMG. Tag builds only.
       - name: Download third-party scans
         if: github.ref_type == 'tag'
         uses: actions/download-artifact@v8
@@ -642,8 +577,6 @@ jobs:
       - name: Collect third-party sources for the release
         if: github.ref_type == 'tag'
         env:
-          # For homebrew-core history lookups when a pinned (e.g. Intel) keg
-          # is older than the current formula.
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 packaging/sources/collect-third-party-sources.py assemble \
@@ -663,9 +596,6 @@ jobs:
   build-ubuntu:
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
-    # The 24.04-amd64 job also runs the test suite, except the slow settings
-    # tests: test-settings-schema runs the schema test against its package,
-    # and settings-apply.yml runs the apply test nightly.
     timeout-minutes: 45
     permissions:
       contents: read
@@ -772,13 +702,11 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build file zip libflac-dev libmpeg2-4-dev libpng-dev libwebp-dev libasound2-dev libmpg123-dev libportmidi-dev libserialport-dev libenet-dev libpcap-dev libzstd-dev libcurl4-openssl-dev nlohmann-json3-dev libdbus-1-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
+          sudo apt-get install -y build-essential clang lld cmake ninja-build file zip libflac-dev libmpeg2-4-dev libpng-dev libwebp-dev libasound2-dev libmpg123-dev libportmidi-dev libserialport-dev libenet-dev libpcap-dev libzstd-dev libcurl4-openssl-dev nlohmann-json3-dev libdbus-1-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
 
       - name: Install SDL3 and SDL3_image
         if: matrix.sdl_source == 'setup-sdl'
         id: sdl
-        # setup-sdl's v1 tag lags main; pin the reviewed main commit instead
-        # of tracking the mutable branch.
         uses: libsdl-org/setup-sdl@4ebea449684c989388fe6bcea0460e300d13a5ae
         with:
           install-linux-dependencies: true
@@ -805,7 +733,7 @@ jobs:
         run: |
           export CCACHE_DIR="$HOME/.ccache"
           export PATH="/usr/lib/ccache:$PATH"
-          cmake -B build -G Ninja -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_PREFIX_PATH="${{ steps.sdl.outputs.prefix }}" -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DDISTRO_CODENAME=${{ matrix.codename }} -DQEMU_UAE_PLUGIN="$QEMU_UAE_PLUGIN" ${{ matrix.extra_cmake_args }} && cmake --build build -j$(nproc)
+          cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_PREFIX_PATH="${{ steps.sdl.outputs.prefix }}" -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DDISTRO_CODENAME=${{ matrix.codename }} -DQEMU_UAE_PLUGIN="$QEMU_UAE_PLUGIN" ${{ matrix.extra_cmake_args }} && cmake --build build -j$(nproc)
           cpack -G DEB --config build/CPackConfig.cmake
 
       - name: make for Ubuntu ${{ matrix.name }} with apt SDL3
@@ -813,20 +741,17 @@ jobs:
         run: |
           export CCACHE_DIR="$HOME/.ccache"
           export PATH="/usr/lib/ccache:$PATH"
-          cmake -B build -G Ninja -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DDISTRO_CODENAME=${{ matrix.codename }} -DQEMU_UAE_PLUGIN="$QEMU_UAE_PLUGIN" && cmake --build build -j$(nproc)
+          cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DDISTRO_CODENAME=${{ matrix.codename }} -DQEMU_UAE_PLUGIN="$QEMU_UAE_PLUGIN" && cmake --build build -j$(nproc)
           cpack -G DEB --config build/CPackConfig.cmake
 
       - name: Run test suite
         if: matrix.name == '24.04-amd64'
         env:
-          # The behavioral tests exercise headless early-exit modes only;
-          # the dummy drivers keep SDL initialization display-server-free.
           SDL_VIDEODRIVER: dummy
           SDL_AUDIODRIVER: dummy
           LD_LIBRARY_PATH: ${{ steps.sdl.outputs.prefix }}/lib
         run: |
           sudo apt-get install -y ripgrep python3 ffmpeg
-          # Retain the compiled /usr installation while relocation tests run its copied binary.
           sudo cmake --install build
           tests/run_tests.sh --skip-slow /usr/bin/amiberry
 
@@ -868,15 +793,8 @@ jobs:
       - name: Verify the 64-bit host ABI policy
         run: bash tests/test_host_architecture.sh
 
-  # The test suite's settings schema test (one of tests/run_tests.sh's
-  # SLOW_TESTS) against the Ubuntu 24.04 package, beside the other jobs: it
-  # regenerates the availability, transition and preset tables and loads
-  # every preset level (about 12 minutes). The other slow test, the settings
-  # apply test, runs nightly (settings-apply.yml).
   test-settings-schema:
     needs: [build-ubuntu]
-    # Another Ubuntu leg's failure does not stop it; a failed 24.04 leg
-    # leaves no package, and the download fails.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     container: ubuntu:24.04
@@ -899,7 +817,6 @@ jobs:
           apt-get update
           apt-get install -y python3 unzip
           cd package
-          # Tag builds upload the package zipped for the release.
           for archive in *.zip; do
             if [ -e "$archive" ]; then unzip -o "$archive"; fi
           done
@@ -931,8 +848,7 @@ jobs:
       - name: Install AppImage build prerequisites
         run: |
           apt-get update
-          # setup-sdl lists SDL releases with the GitHub CLI.
-          apt-get install -y sudo git gh ca-certificates curl build-essential cmake ninja-build pkg-config patchelf binutils file dpkg xz-utils ripgrep python3 ffmpeg libflac-dev libmpeg2-4-dev libpng-dev libwebp-dev libasound2-dev libmpg123-dev libportmidi-dev libserialport-dev libenet-dev libpcap-dev libzstd-dev libcurl4-openssl-dev nlohmann-json3-dev libdbus-1-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
+          apt-get install -y sudo git gh ca-certificates curl build-essential clang lld cmake ninja-build pkg-config patchelf binutils file dpkg xz-utils ripgrep python3 ffmpeg libflac-dev libmpeg2-4-dev libpng-dev libwebp-dev libasound2-dev libmpg123-dev libportmidi-dev libserialport-dev libenet-dev libpcap-dev libzstd-dev libcurl4-openssl-dev nlohmann-json3-dev libdbus-1-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
 
       - name: Check out repository code
         uses: actions/checkout@v6
@@ -985,6 +901,8 @@ jobs:
             --arch "${{ matrix.arch }}" \
             --build-dir "build/appimage-${{ matrix.arch }}" \
             --output-dir dist/appimage \
+            --cmake-arg "-DCMAKE_C_COMPILER=clang" \
+            --cmake-arg "-DCMAKE_CXX_COMPILER=clang++" \
             --cmake-arg "-DCMAKE_PREFIX_PATH=${{ steps.sdl.outputs.prefix }}"
 
       - name: Upload AppImage artifact
@@ -1013,8 +931,6 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
     steps:
-      # The image deliberately uses the host's OpenGL, Wayland client, ALSA and
-      # D-Bus libraries, which the runner images do not all preinstall.
       - name: Install runtime prerequisites
         run: |
           sudo apt-get update
@@ -1149,7 +1065,7 @@ jobs:
             for needed in libglib-2.0.so.0 libz.so.1; do
               readelf -d "$QEMU_PLUGIN" | grep -F "Shared library: [$needed]"
             done
-            cmake -B build -G Ninja -DCMAKE_INSTALL_PREFIX=/usr -DDISTRO_CODENAME=${{ matrix.codename }} -DQEMU_UAE_PLUGIN="$QEMU_PLUGIN"
+            cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_INSTALL_PREFIX=/usr -DDISTRO_CODENAME=${{ matrix.codename }} -DQEMU_UAE_PLUGIN="$QEMU_PLUGIN"
             cmake --build build -j$(nproc)
             cpack -G RPM --config build/CPackConfig.cmake
             rpm -qlp /build/amiberry-*.rpm | grep -E "/amiberry/qemu-uae\\.so$"
@@ -1220,7 +1136,7 @@ jobs:
               for needed in libglib-2.0.so.0 libz.so.1; do
                 readelf -d "$QEMU_PLUGIN" | grep -F "Shared library: [$needed]"
               done
-              cmake -B build -G Ninja -DCMAKE_INSTALL_PREFIX=/usr -DDISTRO_CODENAME=${{ matrix.codename }} -DQEMU_UAE_PLUGIN="$QEMU_PLUGIN" ${{ matrix.extra_cmake_args }}
+              cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_INSTALL_PREFIX=/usr -DDISTRO_CODENAME=${{ matrix.codename }} -DQEMU_UAE_PLUGIN="$QEMU_PLUGIN" ${{ matrix.extra_cmake_args }}
               cmake --build build -j$(nproc)
               cpack -G DEB --config build/CPackConfig.cmake
               dpkg-deb -c /build/amiberry_*.deb | grep -E "/amiberry/qemu-uae\\.so$"
@@ -1289,13 +1205,11 @@ jobs:
             QEMU_PLUGIN="$1"
             test -f "$QEMU_PLUGIN"
             apt-get update
-            # This job cross-compiles; the FFmpeg and WebP headers and libraries
-            # must be the arm64 ones, or CMake silently drops ZZ9000 media codecs.
             apt-get install -y libavformat-dev:arm64 libavcodec-dev:arm64 libavutil-dev:arm64 libswscale-dev:arm64 libswresample-dev:arm64 libwebp-dev:arm64
             for needed in libglib-2.0.so.0 libz.so.1; do
               readelf -d "$QEMU_PLUGIN" | grep -F "Shared library: [$needed]"
             done
-            cmake -DCMAKE_TOOLCHAIN_FILE=cmake/Toolchain-aarch64-linux-gnu.cmake -B build -G Ninja -DCMAKE_INSTALL_PREFIX=/usr -DDISTRO_CODENAME=${{ matrix.codename }} -DQEMU_UAE_PLUGIN="$QEMU_PLUGIN" ${{ matrix.extra_cmake_args }}
+            cmake -DCMAKE_TOOLCHAIN_FILE=cmake/Toolchain-aarch64-linux-gnu.cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_INSTALL_PREFIX=/usr -DDISTRO_CODENAME=${{ matrix.codename }} -DQEMU_UAE_PLUGIN="$QEMU_PLUGIN" ${{ matrix.extra_cmake_args }}
             cmake --build build -j$(nproc)
             cpack -G DEB --config build/CPackConfig.cmake
             dpkg-deb -c /build/amiberry_*.deb | grep -E "/amiberry/qemu-uae\\.so$"
@@ -1312,25 +1226,19 @@ jobs:
         path: "amiberry_*.deb"
         retention-days: 7
 
-    - name: ZIP package for release
-      if: github.ref_type == 'tag'
-      run: zip -r amiberry-${{ github.ref_name }}-${{ matrix.release_name }}.zip amiberry_*.deb
+      - name: ZIP package for release
+        if: github.ref_type == 'tag'
+        run: zip -r amiberry-${{ github.ref_name }}-${{ matrix.release_name }}.zip amiberry_*.deb
 
-    - name: Upload artifact for release
-      if: always() && github.ref_type == 'tag'
-      uses: actions/upload-artifact@v7
-      with:
-        name: ${{ matrix.artifact_name }}
-        path: "amiberry-*.zip"
+      - name: Upload artifact for release
+        if: always() && github.ref_type == 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: "amiberry-*.zip"
 
-  # Windows x64: native build on windows-2025 using llvm-mingw (clang).
-  # Shares the toolchain with build-windows-arm64 so Windows on Arm and x64
-  # use a single compiler stack. Replaced the previous MSYS2/MinGW-w64 GCC
-  # build once the llvm-mingw shakeout was stable.
   build-windows:
     runs-on: windows-2025
-    # Cold-cache runs (vcpkg + llvm-mingw downloads) finish in ~24 min,
-    # warm-cache runs in ~10-15 min — see build-windows-arm64 for comparison.
     timeout-minutes: 60
     permissions:
       contents: read
@@ -1372,7 +1280,6 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\llvm-mingw.zip"
           Expand-Archive -Path "$env:RUNNER_TEMP\llvm-mingw.zip" -DestinationPath "$env:RUNNER_TEMP\llvm-mingw"
           New-Item -ItemType Directory -Force -Path "C:/llvm-mingw" | Out-Null
-          # The archive extracts into a single subdir named $base; flatten.
           Move-Item "$env:RUNNER_TEMP\llvm-mingw\$base\*" "C:/llvm-mingw" -Force
 
       - name: Expose llvm-mingw to subsequent steps
@@ -1394,11 +1301,6 @@ jobs:
         uses: actions/cache@v5
         with:
           path: out/build/windows-release/vcpkg_installed
-          # Include LLVM_MINGW_TAG so a toolchain bump invalidates the
-          # cache: deps built with one CRT/runtime can be ABI-incompatible
-          # with binaries linked by the new toolchain (the original
-          # x64-mingw-dynamic + 20250910 cache showed up as
-          # "undefined symbol: clock_gettime64" link errors).
           key: ${{ runner.os }}-x64-vcpkg-${{ env.LLVM_MINGW_TAG }}-${{ hashFiles('vcpkg.json', 'cmake/Toolchain-x86_64-w64-mingw32.cmake') }}
           restore-keys: |
             ${{ runner.os }}-x64-vcpkg-${{ env.LLVM_MINGW_TAG }}-
@@ -1410,6 +1312,7 @@ jobs:
       - name: Configure
         shell: bash
         run: |
+          export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH=1"
           cmake --preset windows-release -DQEMU_UAE_PLUGIN="$QEMU_UAE_PLUGIN" -DQEMU_UAE_PLUGIN_DIR="$QEMU_UAE_PLUGIN_DIR"
           PRODUCT_VERSION="$(cat out/build/windows-release/amiberry-product-version.txt)"
           if [ -z "$PRODUCT_VERSION" ]; then
@@ -1619,10 +1522,6 @@ jobs:
             throw "--dump-paths should not create conf in the portable tree."
           }
 
-          # --dump-config behavioral coverage lives in the shared test script
-          # (also run by the Linux CI leg), so the assertions stay in one
-          # place. It includes the LF-only check that pins the Windows
-          # binary stdout mode.
           $env:SDL_VIDEODRIVER = "dummy"
           $env:SDL_AUDIODRIVER = "dummy"
           $env:AMIBERRY_BIN = $exePath
@@ -1638,9 +1537,6 @@ jobs:
           }
           Write-Host "x64 (llvm-mingw) Amiberry.exe ran the --dump-config behavioral test successfully."
 
-
-          # x86_64 builds include the JIT, so exercise --jit-selftest from the
-          # portable layout. Mirrors the build-windows-arm64 smoke test.
           $jitStdoutFile = Join-Path $verifyRoot "jit-selftest.stdout"
           $jitStderrFile = Join-Path $verifyRoot "jit-selftest.stderr"
           $jitProc = Start-Process -FilePath $exePath -ArgumentList "--jit-selftest" `
@@ -1653,8 +1549,6 @@ jobs:
           }
           Write-Host "x64 (llvm-mingw) Amiberry.exe ran --jit-selftest successfully."
 
-          # The IPC test starts real emulator instances, which write settings
-          # into the portable tree, so it runs after the tree assertions.
           bash tests/test_ipc_transport.sh
           if ($LASTEXITCODE -ne 0) {
             throw "IPC transport behavioral test failed with exit code $LASTEXITCODE."
@@ -1685,18 +1579,8 @@ jobs:
             amiberry-*.exe
           retention-days: 7
 
-  # Windows ARM64: native build on the GitHub-hosted windows-11-arm
-  # runner using the same llvm-mingw toolchain as build-windows.  Kept
-  # as a separate job because it cross-runs on a different runner image
-  # (windows-11-arm) and needs to install InnoSetup at runtime, but the
-  # toolchain, presets, and packaging are otherwise the same.  This job
-  # is mandatory and a failure blocks the workflow (and downstream
-  # create-release).
   build-windows-arm64:
     runs-on: windows-11-arm
-    # Cold-cache runs finish in ~24 min, warm-cache runs in ~8 min. The
-    # extra time vs. x64 mostly comes from the InnoSetup-via-Chocolatey
-    # install path (windows-11-arm doesn't preinstall ISCC).
     timeout-minutes: 60
     permissions:
       contents: read
@@ -1738,7 +1622,6 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\llvm-mingw.zip"
           Expand-Archive -Path "$env:RUNNER_TEMP\llvm-mingw.zip" -DestinationPath "$env:RUNNER_TEMP\llvm-mingw"
           New-Item -ItemType Directory -Force -Path "C:/llvm-mingw" | Out-Null
-          # The archive extracts into a single subdir named $base; flatten.
           Move-Item "$env:RUNNER_TEMP\llvm-mingw\$base\*" "C:/llvm-mingw" -Force
 
       - name: Expose llvm-mingw to subsequent steps
@@ -1760,9 +1643,6 @@ jobs:
         uses: actions/cache@v5
         with:
           path: out/build/windows-arm64-release/vcpkg_installed
-          # Include LLVM_MINGW_TAG so a toolchain bump invalidates the
-          # cache (avoids ABI mismatches between deps built with one
-          # toolchain and binaries linked with another).
           key: ${{ runner.os }}-arm64-vcpkg-${{ env.LLVM_MINGW_TAG }}-${{ hashFiles('vcpkg.json', 'cmake/Toolchain-aarch64-w64-mingw32.cmake') }}
           restore-keys: |
             ${{ runner.os }}-arm64-vcpkg-${{ env.LLVM_MINGW_TAG }}-
@@ -1774,6 +1654,7 @@ jobs:
       - name: Configure
         shell: bash
         run: |
+          export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH=1"
           cmake --preset windows-arm64-release -DQEMU_UAE_PLUGIN="$QEMU_UAE_PLUGIN" -DQEMU_UAE_PLUGIN_DIR="$QEMU_UAE_PLUGIN_DIR"
           PRODUCT_VERSION="$(cat out/build/windows-arm64-release/amiberry-product-version.txt)"
           if [ -z "$PRODUCT_VERSION" ]; then
@@ -1786,8 +1667,6 @@ jobs:
         shell: bash
         run: |
           cmake --build out/build/windows-arm64-release -j$NUMBER_OF_PROCESSORS
-          # vcpkg's FFmpeg port does not configure for arm64-mingw, so this
-          # build has WebP but not the FFmpeg codecs (see vcpkg.json).
           for library in webp webpdemux; do
             find out/build/windows-arm64-release -maxdepth 1 -iname "*${library}*.dll" -print -quit | grep -q .
           done
@@ -1810,9 +1689,9 @@ jobs:
           : > "$PORTABLE_ROOT/amiberry.portable"
 
           if [ "${{ github.ref_type }}" = "tag" ]; then
-            ZIP_NAME="amiberry-${{ github.ref_name }}-windows-arm64-portable.zip"
+            ZIP_NAME="amiberry-${{ github.ref_name }}-${{ matrix.release_suffix }}-portable.zip"
           else
-            ZIP_NAME="amiberry-${{ github.sha }}-windows-arm64-portable.zip"
+            ZIP_NAME="amiberry-${{ github.sha }}-${{ matrix.release_suffix }}-portable.zip"
           fi
 
           PACKAGE_ROOT="out/package/windows-arm64-release/${ZIP_NAME%.zip}"
@@ -1903,8 +1782,6 @@ jobs:
           }
           Write-Host "ARM64 Amiberry.exe ran --dump-paths successfully."
 
-          # Shared dump-mode behavioral tests also run on the x64 and Linux
-          # legs; ARM64 has no JIT, but every path assertion applies.
           $env:SDL_VIDEODRIVER = "dummy"
           $env:SDL_AUDIODRIVER = "dummy"
           $env:AMIBERRY_BIN = $exePath
@@ -1917,7 +1794,6 @@ jobs:
             throw "plugin search path behavioral test failed with exit code $LASTEXITCODE."
           }
           Write-Host "ARM64 Amiberry.exe ran the dump-mode behavioral tests successfully."
-
 
           $jitStdoutFile = Join-Path $verifyRoot "jit-selftest.stdout"
           $jitStderrFile = Join-Path $verifyRoot "jit-selftest.stderr"
@@ -1934,21 +1810,14 @@ jobs:
       - name: Ensure InnoSetup is available
         shell: pwsh
         run: |
-          # InnoSetup ships as an x86 binary; it runs under WoA x86 emulation
-          # on windows-11-arm runners.  If ISCC is already on PATH (e.g. via
-          # a future preinstall), use it; otherwise install via Chocolatey.
           $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
           if ($iscc) {
             Write-Host "ISCC already available at $($iscc.Source)"
           } else {
             Write-Host "ISCC not found, installing InnoSetup via Chocolatey..."
-            # Chocolatey is preinstalled on all GitHub-hosted Windows runners.
             choco install innosetup --no-progress --yes | Out-Null
-            # Chocolatey shims go to C:\ProgramData\chocolatey\bin which is
-            # already on PATH; verify ISCC is reachable.
             $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
             if (-not $iscc) {
-              # Fallback: add the standard install dir explicitly.
               $programFiles = ${env:ProgramFiles(x86)}
               $fallback = Join-Path $programFiles "Inno Setup 6"
               if (Test-Path $fallback) {
@@ -1985,11 +1854,6 @@ jobs:
             amiberry-*.exe
           retention-days: 7
 
-  # Signs both Windows architectures with the Certum SimplySign cloud
-  # certificate: the installer EXE, and Amiberry.exe inside the portable ZIP.
-  # One job signs both, so there is a single SimplySign login per release,
-  # and the signing secrets live in the windows-signing environment, out of
-  # reach of the jobs that run the build.
   sign-windows:
     needs: [build-windows, build-windows-arm64]
     if: github.ref_type == 'tag'
@@ -2084,10 +1948,6 @@ jobs:
         if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
         with:
-          # Use the CLANG64 subsystem so the libretro core is also built
-          # with llvm-mingw / clang, matching build-windows. The
-          # mingw-w64-clang-x86_64-toolchain package provides clang,
-          # clang++, lld, libc++, libunwind, libwinpthread.
           msystem: CLANG64
           update: false
           install: mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-zlib make
@@ -2173,7 +2033,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     if: github.ref_type == 'tag' && (startsWith(github.ref_name, 'v') || startsWith(github.ref_name, 'preview-v'))
-    # Elevated permissions only where needed for creating a release
     permissions:
       contents: write
       actions: read
@@ -2224,7 +2083,6 @@ jobs:
 
   upload-ppa:
     needs: create-release
-    # Only upload stable releases (not preview-v* pre-releases)
     if: ${{ !startsWith(github.ref_name, 'preview-v') }}
     uses: ./.github/workflows/ppa-upload.yml
     with:
