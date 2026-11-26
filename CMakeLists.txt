@@ -18,16 +18,22 @@ if(AMIBERRY_AX_USE_AX_SDK AND NOT TARGET ax::core)
     endif()
 endif()
 
-add_library(amiberry_ax_persist STATIC
-    src/ax_persist_callers.cpp
-)
-target_compile_features(amiberry_ax_persist PRIVATE cxx_std_20)
-target_include_directories(amiberry_ax_persist PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-)
-if(TARGET ax::core)
-    target_link_libraries(amiberry_ax_persist PUBLIC ax::core)
-endif()
+set(_amiberry_ax_persist_src "${CMAKE_CURRENT_SOURCE_DIR}/src/ax_persist_callers.cpp")
+if(EXISTS "${_amiberry_ax_persist_src}")
+    add_library(amiberry_ax_persist STATIC
+        "${_amiberry_ax_persist_src}"
+    )
+    target_compile_features(amiberry_ax_persist PRIVATE cxx_std_20)
+    target_include_directories(amiberry_ax_persist PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+    if(AMIBERRY_AX_USE_AX_SDK AND TARGET ax::core)
+        target_link_libraries(amiberry_ax_persist PUBLIC ax::core)
+    endif()
 
-# Link amiberry_ax_persist into the main Amiberry executable target:
-# target_link_libraries(amiberry PRIVATE amiberry_ax_persist)
+    foreach(_amiberry_target IN ITEMS amiberry amiberry-ax)
+        if(TARGET "${_amiberry_target}")
+            target_link_libraries("${_amiberry_target}" PRIVATE amiberry_ax_persist)
+        endif()
+    endforeach()
+endif()
